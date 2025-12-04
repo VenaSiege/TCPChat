@@ -25,7 +25,7 @@ TCPChat/
 ## 系统要求
 
 - Python 3.6 或更高版本
-- Windows/Linux/macOS 系统
+- Windows 系统
 - 网络连接
 
 ## 使用方法
