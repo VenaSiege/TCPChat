@@ -119,6 +119,20 @@ class ChatServer:
                     else:
                         client_socket.send(f'RESET_FAILURE {message}\n'.encode('utf-8'))
 
+                elif command == 'DELETE_ACCOUNT':
+                    if len(parts) < 3:
+                        client_socket.send('DELETE_FAILURE 命令格式错误\n'.encode('utf-8'))
+                        continue
+
+                    username = parts[1]
+                    password = parts[2]
+                    success, message = self.auth_manager.delete_user(username, password)
+
+                    if success:
+                        client_socket.send('DELETE_SUCCESS\n'.encode('utf-8'))
+                    else:
+                        client_socket.send(f'DELETE_FAILURE {message}\n'.encode('utf-8'))
+
                 elif command == 'LOGOUT':
                     return False, None
 

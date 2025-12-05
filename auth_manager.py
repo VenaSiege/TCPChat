@@ -205,6 +205,49 @@ class AuthenticationManager:
             else:
                 return False, "用户不存在"
 
+    def delete_user(self, username: str, password: str) -> Tuple[bool, str]:
+        """
+        删除用户账户（需要凭证验证）
+
+        Args:
+            username: 用户名
+            password: 密码
+
+        Returns:
+            (success: bool, message: str) 元组
+        """
+        with self.lock:
+            # 检查用户是否存在
+            if username not in self.credentials['users']:
+                return False, "用户不存在"
+
+            user = self.credentials['users'][username]
+
+            # 验证密码
+            if not self._verify_password(password, user['password_hash']):
+                return False, "密码错误"
+
+            # 检查用户是否在线（防止删除活动会话）
+            if user.get('is_online', False):
+                return False, "无法删除在线用户，请先退出登录"
+
+            # 从凭证存储中删除用户
+            del self.credentials['users'][username]
+
+            # 删除与该用户关联的所有重置令牌
+            tokens_to_remove = []
+            for token, token_info in self.credentials['reset_tokens'].items():
+                if token_info['username'] == username:
+                    tokens_to_remove.append(token)
+
+            for token in tokens_to_remove:
+                del self.credentials['reset_tokens'][token]
+
+            # 持久化更改
+            self._save_credentials()
+
+            return True, "账户删除成功"
+
     def _hash_password(self, password: str) -> str:
         """
         使用SHA256生成密码哈希

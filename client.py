@@ -3,6 +3,11 @@ import threading
 import sys
 import time
 from datetime import datetime
+import getpass
+
+# Platform-specific imports for password masking
+if sys.platform == 'win32':
+    import msvcrt
 
 class ChatClient:
     def __init__(self, host='localhost', port=5000):
@@ -123,6 +128,47 @@ class ChatClient:
         timestamp = datetime.now().strftime("%H:%M:%S")
         print(f"[{timestamp}] 【错误】{message}")
 
+    def _get_masked_password(self, prompt: str = "密码: ") -> str:
+        """
+        获取密码输入并用星号掩码显示
+
+        Args:
+            prompt: 提示文本
+
+        Returns:
+            str: 用户输入的密码字符串
+        """
+        if sys.platform == 'win32':
+            # Windows: 使用 msvcrt 实现字符级输入和星号显示
+            print(prompt, end='', flush=True)
+            password = []
+            while True:
+                char = msvcrt.getch()
+                if char in (b'\r', b'\n'):  # Enter键
+                    print()  # 换行
+                    break
+                elif char == b'\x08':  # Backspace键
+                    if password:
+                        password.pop()
+                        # 删除一个星号：退格、空格、退格
+                        print('\b \b', end='', flush=True)
+                elif char == b'\x03':  # Ctrl+C
+                    print()
+                    raise KeyboardInterrupt
+                else:
+                    try:
+                        # 尝试解码字符
+                        decoded_char = char.decode('utf-8')
+                        password.append(decoded_char)
+                        print('*', end='', flush=True)
+                    except UnicodeDecodeError:
+                        # 忽略无法解码的字符
+                        pass
+            return ''.join(password)
+        else:
+            # Unix/Linux/macOS: 使用 getpass (隐藏输入，不显示星号)
+            return getpass.getpass(prompt)
+
     def _handle_connection_loss(self) -> bool:
         """
         处理连接丢失，提供重新连接选项
@@ -226,10 +272,11 @@ class ChatClient:
                 print("1. 登录")
                 print("2. 注册")
                 print("3. 重置密码")
-                print("4. 退出")
+                print("4. 删除账户")
+                print("5. 退出")
                 print("=" * 50)
 
-                choice = input("请选择操作 (1-4): ").strip()
+                choice = input("请选择操作 (1-5): ").strip()
 
                 if choice == '1':
                     if self.login():
@@ -256,6 +303,15 @@ class ChatClient:
                             return False
 
                 elif choice == '4':
+                    if self.delete_account():
+                        # 删除成功，断开连接并退出
+                        return False
+                    # 如果连接断开，尝试重新连接
+                    if not self.connected:
+                        if not self._handle_connection_loss():
+                            return False
+
+                elif choice == '5':
                     print("[客户端] 退出")
                     return False
                 else:
@@ -285,7 +341,7 @@ class ChatClient:
                 self._display_error("用户名不能为空")
                 return False
 
-            password = input("密码: ").strip()
+            password = self._get_masked_password("密码: ").strip()
             if not password:
                 self._display_error("密码不能为空")
                 return False
@@ -337,14 +393,14 @@ class ChatClient:
                 self._display_error("用户名不能为空")
                 return False
 
-            password = input("密码 (至少6个字符): ").strip()
+            password = self._get_masked_password("密码 (至少6个字符): ").strip()
 
             # 验证密码长度
             if len(password) < 6:
                 self._display_error("密码长度必须至少为6个字符")
                 return False
 
-            confirm_password = input("确认密码: ").strip()
+            confirm_password = self._get_masked_password("确认密码: ").strip()
             if password != confirm_password:
                 self._display_error("两次输入的密码不一致")
                 return False
@@ -438,14 +494,14 @@ class ChatClient:
                     self._display_error("令牌不能为空")
                     return
 
-            new_password = input("新密码 (至少6个字符): ").strip()
+            new_password = self._get_masked_password("新密码 (至少6个字符): ").strip()
 
             # 验证密码长度
             if len(new_password) < 6:
                 self._display_error("密码长度必须至少为6个字符")
                 return
 
-            confirm_password = input("确认新密码: ").strip()
+            confirm_password = self._get_masked_password("确认新密码: ").strip()
             if new_password != confirm_password:
                 self._display_error("两次输入的密码不一致")
                 return
@@ -473,6 +529,64 @@ class ChatClient:
             print("\n[系统] 密码重置确认操作已取消")
         except Exception as e:
             self._display_error(f"密码重置确认过程出错: {e}")
+
+    def delete_account(self) -> bool:
+        """
+        处理账户删除流程
+
+        Returns:
+            bool: 删除成功返回True，否则返回False
+        """
+        try:
+            print("\n--- 删除账户 ---")
+            print("警告：此操作无法撤销！")
+
+            username = input("用户名: ").strip()
+            if not username:
+                self._display_error("用户名不能为空")
+                return False
+
+            password = self._get_masked_password("密码: ").strip()
+            if not password:
+                self._display_error("密码不能为空")
+                return False
+
+            # 确认提示
+            confirmation = input("\n您确定要删除此账户吗？此操作无法撤销！(yes/no): ").strip().lower()
+            if confirmation != 'yes':
+                print("[系统] 账户删除已取消")
+                return False
+
+            # 发送删除账户命令
+            delete_command = f"DELETE_ACCOUNT {username} {password}"
+            if not self._send_auth_command(delete_command):
+                return False
+
+            # 接收并解析服务器响应
+            response = self._receive_auth_response()
+            if not response:
+                return False
+
+            # 解析响应
+            if response.startswith('DELETE_SUCCESS'):
+                self._display_success("账户已成功删除")
+                print("[客户端] 正在断开连接...")
+                self.connected = False
+                return True
+            elif response.startswith('DELETE_FAILURE'):
+                _, error_msg = self._parse_response(response, 'DELETE_SUCCESS')
+                self._display_error(error_msg)
+                return False
+            else:
+                self._display_error("未知的服务器响应")
+                return False
+
+        except KeyboardInterrupt:
+            print("\n[系统] 账户删除操作已取消")
+            return False
+        except Exception as e:
+            self._display_error(f"账户删除过程出错: {e}")
+            return False
 
     def set_username(self):
         """设置用户名"""
