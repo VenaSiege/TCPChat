@@ -1,6 +1,7 @@
 import socket
 import threading
 import time
+import json
 from datetime import datetime
 from auth_manager import AuthenticationManager
 
@@ -47,17 +48,17 @@ class ChatServer:
         处理认证协议
 
         Args:
-            client_socket: 客
+            client_socket: 客户端套接字
 
         Returns:
-            (authenticated: bool, username: str) 元组
+            (authenticated: bool, username: str, role: str) 元组
         """
         try:
             while True:
                 # 接收认证命令
                 auth_message = client_socket.recv(1024).decode('utf-8').strip()
                 if not auth_message:
-                    return False, None
+                    return False, None, None
 
                 parts = auth_message.split(' ', 2)
                 command = parts[0]
@@ -67,12 +68,22 @@ class ChatServer:
                         client_socket.send('REGISTER_FAILURE 命令格式错误\n'.encode('utf-8'))
                         continue
 
+                    # 解析注册命令: REGISTER <username> <password> [role] [admin_code]
                     username = parts[1]
-                    password = parts[2]
-                    success, message = self.auth_manager.register_user(username, password)
+                    remaining = parts[2].split(' ', 2)
+                    password = remaining[0]
+                    role = 'user'
+                    admin_code = None
+
+                    if len(remaining) >= 2:
+                        role = remaining[1]
+                    if len(remaining) >= 3:
+                        admin_code = remaining[2]
+
+                    success, message, user_role = self.auth_manager.register_user(username, password, role, admin_code)
 
                     if success:
-                        client_socket.send('REGISTER_SUCCESS\n'.encode('utf-8'))
+                        client_socket.send(f'REGISTER_SUCCESS {user_role}\n'.encode('utf-8'))
                     else:
                         client_socket.send(f'REGISTER_FAILURE {message}\n'.encode('utf-8'))
 
@@ -83,12 +94,12 @@ class ChatServer:
 
                     username = parts[1]
                     password = parts[2]
-                    success, message = self.auth_manager.authenticate_user(username, password)
+                    success, message, role = self.auth_manager.authenticate_user(username, password)
 
                     if success:
                         self.auth_manager.mark_user_online(username)
-                        client_socket.send(f'AUTH_SUCCESS {username}\n'.encode('utf-8'))
-                        return True, username
+                        client_socket.send(f'AUTH_SUCCESS {username} {role}\n'.encode('utf-8'))
+                        return True, username, role
                     else:
                         client_socket.send(f'AUTH_FAILURE {message}\n'.encode('utf-8'))
 
@@ -126,22 +137,82 @@ class ChatServer:
 
                     username = parts[1]
                     password = parts[2]
-                    success, message = self.auth_manager.delete_user(username, password)
+                    # 请求用户就是要删除的用户（普通用户只能删除自己的账户）
+                    success, message = self.auth_manager.delete_user(username, username, password)
 
                     if success:
                         client_socket.send('DELETE_SUCCESS\n'.encode('utf-8'))
                     else:
                         client_socket.send(f'DELETE_FAILURE {message}\n'.encode('utf-8'))
 
+                elif command == 'LIST_USERS':
+                    # LIST_USERS 需要在登录后调用，但在进入聊天阶段之前
+                    # 客户端需要先发送 LOGIN，然后可以发送 LIST_USERS
+                    # 为了支持这个功能，我们需要跟踪当前已认证的用户
+                    # 但由于 handle_authentication 的设计，我们需要从命令中获取用户名
+                    # 或者要求客户端在 LIST_USERS 命令中包含用户名
+
+                    # 解析命令: LIST_USERS <username>
+                    if len(parts) < 2:
+                        client_socket.send('USER_LIST_FAILURE 命令格式错误\n'.encode('utf-8'))
+                        continue
+
+                    requesting_username = parts[1]
+                    success, result = self.auth_manager.list_all_users(requesting_username)
+
+                    if success:
+                        # 将用户列表编码为JSON并发送
+                        import json
+                        user_list_json = json.dumps(result, ensure_ascii=False)
+                        client_socket.send(f'USER_LIST {user_list_json}\n'.encode('utf-8'))
+                    else:
+                        client_socket.send(f'USER_LIST_FAILURE {result}\n'.encode('utf-8'))
+
+                elif command == 'ADMIN_DELETE_USER':
+                    # 解析命令: ADMIN_DELETE_USER <admin_username> <target_username>
+                    if len(parts) < 3:
+                        client_socket.send('ADMIN_DELETE_FAILURE 命令格式错误\n'.encode('utf-8'))
+                        continue
+
+                    admin_username = parts[1]
+                    target_username = parts[2]
+
+                    # 调用 admin_delete_user 方法
+                    success, message = self.auth_manager.admin_delete_user(admin_username, target_username)
+
+                    if success:
+                        # 发送成功响应
+                        client_socket.send(f'ADMIN_DELETE_SUCCESS {target_username}\n'.encode('utf-8'))
+
+                        # 广播删除通知给所有连接的客户端
+                        timestamp = datetime.now().strftime("%H:%M:%S")
+                        broadcast_message = f"[{timestamp}] 【系统】管理员已删除用户 {target_username}"
+                        self.broadcast(broadcast_message)
+
+                        # 如果目标用户在线，需要终止其会话
+                        # 查找并断开目标用户的连接
+                        with self.lock:
+                            for client_info in self.clients[:]:  # 使用切片创建副本以避免修改列表时出错
+                                if client_info.get('name') == target_username:
+                                    try:
+                                        # 发送通知给被删除的用户
+                                        client_info['socket'].send('【系统】您的账户已被管理员删除，连接即将断开\n'.encode('utf-8'))
+                                        # 关闭连接
+                                        client_info['socket'].close()
+                                    except Exception as e:
+                                        print(f"[错误] 断开用户 {target_username} 连接时出错: {e}")
+                    else:
+                        client_socket.send(f'ADMIN_DELETE_FAILURE {message}\n'.encode('utf-8'))
+
                 elif command == 'LOGOUT':
-                    return False, None
+                    return False, None, None
 
                 else:
                     client_socket.send('AUTH_FAILURE 未知命令\n'.encode('utf-8'))
 
         except Exception as e:
             print(f"[错误] 认证处理出错: {e}")
-            return False, None
+            return False, None, None
 
     def handle_client(self, client_socket, client_address):
         """处理单个客户端连接"""
@@ -149,7 +220,7 @@ class ChatServer:
 
         try:
             # 认证阶段
-            authenticated, client_name = self.handle_authentication(client_socket)
+            authenticated, client_name, role = self.handle_authentication(client_socket)
 
             if not authenticated or not client_name:
                 # 认证失败或用户选择退出
@@ -161,7 +232,8 @@ class ChatServer:
                     'socket': client_socket,
                     'address': client_address,
                     'name': client_name,
-                    'authenticated': True
+                    'authenticated': True,
+                    'role': role
                 })
 
             timestamp = datetime.now().strftime("%H:%M:%S")

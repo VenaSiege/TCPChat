@@ -17,6 +17,7 @@ class ChatClient:
         self.connected = False
         self.username = None
         self.authenticated = False
+        self.user_role = None  # 'admin' or 'user'
         self.connection_timeout = 10  # 连接超时时间（秒）
         self.socket_timeout = 5  # socket操作超时时间（秒）
         self.max_retries = 3  # 最大重试次数
@@ -271,12 +272,13 @@ class ChatClient:
                 print("=" * 50)
                 print("1. 登录")
                 print("2. 注册")
-                print("3. 重置密码")
-                print("4. 删除账户")
-                print("5. 退出")
+                print("3. 注册为管理员")
+                print("4. 重置密码")
+                print("5. 删除账户")
+                print("6. 退出")
                 print("=" * 50)
 
-                choice = input("请选择操作 (1-5): ").strip()
+                choice = input("请选择操作 (1-6): ").strip()
 
                 if choice == '1':
                     if self.login():
@@ -296,13 +298,22 @@ class ChatClient:
                             return False
 
                 elif choice == '3':
-                    self.request_password_reset()
+                    if self.register_admin():
+                        # 注册成功后自动登录
+                        print("\n管理员注册成功！请登录。")
                     # 如果连接断开，尝试重新连接
                     if not self.connected:
                         if not self._handle_connection_loss():
                             return False
 
                 elif choice == '4':
+                    self.request_password_reset()
+                    # 如果连接断开，尝试重新连接
+                    if not self.connected:
+                        if not self._handle_connection_loss():
+                            return False
+
+                elif choice == '5':
                     if self.delete_account():
                         # 删除成功，断开连接并退出
                         return False
@@ -311,7 +322,7 @@ class ChatClient:
                         if not self._handle_connection_loss():
                             return False
 
-                elif choice == '5':
+                elif choice == '6':
                     print("[客户端] 退出")
                     return False
                 else:
@@ -358,12 +369,18 @@ class ChatClient:
 
             # 解析响应
             if response.startswith('AUTH_SUCCESS'):
-                success, returned_username = self._parse_response(response, 'AUTH_SUCCESS')
-                if success:
-                    self.username = returned_username if returned_username else username
+                # AUTH_SUCCESS format: AUTH_SUCCESS <username> <role>
+                parts = response.split()
+                if len(parts) >= 3:
+                    self.username = parts[1]
+                    self.user_role = parts[2]
                     self.authenticated = True
-                    self._display_success(f"登录成功！欢迎 {self.username}")
+                    role_display = '管理员' if self.user_role == 'admin' else '普通用户'
+                    self._display_success(f"登录成功！欢迎 {self.username} ({role_display})")
                     return True
+                else:
+                    self._display_error("服务器响应格式错误")
+                    return False
             elif response.startswith('AUTH_FAILURE'):
                 _, error_msg = self._parse_response(response, 'AUTH_SUCCESS')
                 self._display_error(error_msg)
@@ -432,6 +449,68 @@ class ChatClient:
             return False
         except Exception as e:
             self._display_error(f"注册过程出错: {e}")
+            return False
+
+    def register_admin(self) -> bool:
+        """
+        处理管理员注册流程
+
+        Returns:
+            bool: 注册成功返回True，否则返回False
+        """
+        try:
+            print("\n--- 注册管理员账户 ---")
+            print("注意：注册管理员需要提供管理员代码")
+
+            username = input("用户名: ").strip()
+            if not username:
+                self._display_error("用户名不能为空")
+                return False
+
+            password = self._get_masked_password("密码 (至少6个字符): ").strip()
+
+            # 验证密码长度
+            if len(password) < 6:
+                self._display_error("密码长度必须至少为6个字符")
+                return False
+
+            confirm_password = self._get_masked_password("确认密码: ").strip()
+            if password != confirm_password:
+                self._display_error("两次输入的密码不一致")
+                return False
+
+            admin_code = input("管理员代码: ").strip()
+            if not admin_code:
+                self._display_error("管理员代码不能为空")
+                return False
+
+            # 发送管理员注册命令
+            register_command = f"REGISTER {username} {password} admin {admin_code}"
+            if not self._send_auth_command(register_command):
+                return False
+
+            # 接收并解析服务器响应
+            response = self._receive_auth_response()
+            if not response:
+                return False
+
+            # 解析响应
+            if response.startswith('REGISTER_SUCCESS'):
+                self._display_success("管理员注册成功！")
+                return True
+            elif response.startswith('REGISTER_FAILURE'):
+                _, error_msg = self._parse_response(response, 'REGISTER_SUCCESS')
+                self._display_error(error_msg)
+                return False
+            else:
+                self._display_error("未知的服务器响应")
+                return False
+
+        except KeyboardInterrupt:
+            print("\n[系统] 管理员注册操作已取消")
+            return False
+        except Exception as e:
+            self._display_error(f"管理员注册过程出错: {e}")
             return False
 
     def request_password_reset(self) -> None:
@@ -588,6 +667,140 @@ class ChatClient:
             self._display_error(f"账户删除过程出错: {e}")
             return False
 
+    def list_users(self) -> None:
+        """
+        处理用户列表请求流程（仅管理员）
+
+        显示所有注册用户的用户名、角色和在线状态
+        """
+        try:
+            import json
+
+            print("\n--- 用户列表 ---")
+
+            # 发送用户列表请求命令（需要包含当前用户名）
+            if not self.username:
+                self._display_error("未登录，无法获取用户列表")
+                return
+
+            list_command = f"LIST_USERS {self.username}"
+            if not self._send_auth_command(list_command):
+                return
+
+            # 接收并解析服务器响应
+            response = self._receive_auth_response()
+            if not response:
+                return
+
+            # 解析响应
+            if response.startswith('USER_LIST '):
+                # 提取JSON数据
+                json_start = response.find(' ') + 1
+                json_data = response[json_start:].strip()
+
+                try:
+                    user_list = json.loads(json_data)
+
+                    # 检查是否为空列表
+                    if not user_list:
+                        print("\n当前系统中没有注册用户。")
+                        return
+
+                    # 显示格式化的用户列表
+                    print("\n" + "=" * 60)
+                    print(f"{'用户名':<20} {'角色':<10} {'状态':<10}")
+                    print("=" * 60)
+
+                    for user in user_list:
+                        username = user.get('username', 'N/A')
+                        role = user.get('role', 'N/A')
+                        is_online = user.get('is_online', False)
+                        status = '在线' if is_online else '离线'
+
+                        # 格式化角色显示
+                        role_display = '管理员' if role == 'admin' else '普通用户'
+
+                        print(f"{username:<20} {role_display:<10} {status:<10}")
+
+                    print("=" * 60)
+                    print(f"总计: {len(user_list)} 个用户\n")
+
+                except json.JSONDecodeError as e:
+                    self._display_error(f"解析用户列表数据失败: {e}")
+                except Exception as e:
+                    self._display_error(f"处理用户列表数据失败: {e}")
+
+            elif response.startswith('USER_LIST_FAILURE'):
+                _, error_msg = self._parse_response(response, 'USER_LIST')
+                self._display_error(error_msg)
+            else:
+                self._display_error("未知的服务器响应")
+
+        except KeyboardInterrupt:
+            print("\n[系统] 用户列表操作已取消")
+        except Exception as e:
+            self._display_error(f"获取用户列表过程出错: {e}")
+
+    def admin_delete_user(self) -> None:
+        """
+        处理管理员删除用户流程（仅管理员）
+
+        首先显示用户列表，然后提示输入目标用户名并确认删除
+        """
+        try:
+            print("\n--- 管理员删除用户 ---")
+
+            # 检查是否已登录
+            if not self.username:
+                self._display_error("未登录，无法执行管理员操作")
+                return
+
+            # 首先显示用户列表
+            print("正在获取用户列表...")
+            self.list_users()
+
+            # 提示输入目标用户名
+            print("\n请输入要删除的用户名")
+            target_username = input("目标用户名: ").strip()
+            if not target_username:
+                self._display_error("用户名不能为空")
+                return
+
+            # 确认提示
+            print(f"\n警告：您即将删除用户 '{target_username}'")
+            print("此操作无法撤销！")
+            confirmation = input("确认删除此用户？(yes/no): ").strip().lower()
+            if confirmation != 'yes':
+                print("[系统] 删除操作已取消")
+                return
+
+            # 发送管理员删除命令
+            # 命令格式: ADMIN_DELETE_USER <admin_username> <target_username>
+            delete_command = f"ADMIN_DELETE_USER {self.username} {target_username}"
+            if not self._send_auth_command(delete_command):
+                return
+
+            # 接收并解析服务器响应
+            response = self._receive_auth_response()
+            if not response:
+                return
+
+            # 解析响应
+            if response.startswith('ADMIN_DELETE_SUCCESS'):
+                parts = response.split()
+                deleted_username = parts[1] if len(parts) > 1 else target_username
+                self._display_success(f"用户 '{deleted_username}' 已成功删除")
+            elif response.startswith('ADMIN_DELETE_FAILURE'):
+                _, error_msg = self._parse_response(response, 'ADMIN_DELETE_SUCCESS')
+                self._display_error(error_msg)
+            else:
+                self._display_error("未知的服务器响应")
+
+        except KeyboardInterrupt:
+            print("\n[系统] 管理员删除操作已取消")
+        except Exception as e:
+            self._display_error(f"管理员删除过程出错: {e}")
+
     def set_username(self):
         """设置用户名"""
         while not self.username:
@@ -628,9 +841,46 @@ class ChatClient:
                     print(f"\n[错误] 接收消息失败: {e}")
                 break
 
+    def show_admin_menu(self) -> None:
+        """
+        显示管理员菜单并处理管理员操作
+
+        仅当用户角色为管理员时显示此菜单
+        """
+        if self.user_role != 'admin':
+            self._display_error("此功能仅限管理员使用")
+            return
+
+        try:
+            print("\n" + "=" * 50)
+            print("         管理员菜单")
+            print("=" * 50)
+            print("1. 查看用户列表")
+            print("2. 删除用户")
+            print("3. 返回聊天")
+            print("=" * 50)
+
+            choice = input("请选择操作 (1-3): ").strip()
+
+            if choice == '1':
+                self.list_users()
+            elif choice == '2':
+                self.admin_delete_user()
+            elif choice == '3':
+                print("[系统] 返回聊天界面")
+            else:
+                print("[错误] 无效的选择")
+
+        except KeyboardInterrupt:
+            print("\n[系统] 管理员菜单操作已取消")
+        except Exception as e:
+            self._display_error(f"管理员菜单操作出错: {e}")
+
     def send_messages(self):
         """发送消息到服务器"""
         print("开始聊天 (输入 'exit' 或 'logout' 退出):\n")
+        if self.user_role == 'admin':
+            print("管理员命令: /admin - 打开管理员菜单\n")
         print("> ", end='', flush=True)
 
         try:
@@ -647,6 +897,15 @@ class ChatClient:
                             pass  # 忽略发送失败，继续断开连接
                     self.connected = False
                     break
+
+                # 处理管理员命令
+                if message.lower() == '/admin':
+                    if self.user_role == 'admin':
+                        self.show_admin_menu()
+                    else:
+                        self._display_error("此命令仅限管理员使用")
+                    print("> ", end='', flush=True)
+                    continue
 
                 if not message:
                     print("> ", end='', flush=True)
