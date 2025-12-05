@@ -616,6 +616,9 @@ class ChatClient:
                     self.connected = False
                     print("\n[系统] 已断开连接")
                     break
+            except socket.timeout:
+                # 超时是正常的，继续等待消息
+                continue
             except ConnectionResetError:
                 self.connected = False
                 print("\n[系统] 服务器已断开连接")
@@ -677,6 +680,10 @@ class ChatClient:
             print("=" * 50)
             print(f"欢迎 {self.username}！")
             print()
+
+            # 进入聊天阶段后，设置较长的超时时间以保持长连接
+            # 使用较长的超时（300秒 = 5分钟）而不是完全阻塞，以便能够检测连接问题
+            self.socket.settimeout(300)
 
             # 创建接收消息的线程
             receive_thread = threading.Thread(target=self.receive_messages, daemon=True)
